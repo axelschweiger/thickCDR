@@ -1,4 +1,4 @@
-#!/usr/bin/env python
+#!/usr/bin/env pangeo312_mamba
 # -*- coding: utf-8 -*-
 """
 Created on Tue Nov 30 14:35:33 2021
@@ -26,26 +26,30 @@ import flox
 sys.path.append('/home/axel/ax_python_lib/axel_utilities')
 import axutil
 import pandas as pd
-
+import ax_im_utils as im
 #import xoak
 
-def read_thickCDR(): 
+def read_thickCDR(source=None): 
     cdrfile='/home/axel/projects/sea_ice_cdr/idl/axel_cdr/ncdf_dir/uThickCDR_summaries.20251010_V1.0.nc'
-    cdr=xr.open_dataset(cdrfile)
-    
+    cdr_ds=xr.open_dataset(cdrfile)
+    sources=np.unique(cdr_ds.SOURCE.values)
+    if not source==None:         
 #    cdr=cdr.where((cdr.SOURCE =='AIR-EM') & (cdr.PLATFORM=='2019MOSAIC'),drop=True)
-    cdr=cdr.where((cdr.SOURCE =='AIR-EM'),drop=True)
-    fdate=cdr.FDATE
+#    cdr=cdr.where((cdr.SOURCE =='AIR-EM') | (cdr.SOURCE=='BGEP') 
+#                  | (cdr.SOURCE=='IOS-EBS')
+#                  | (cdr.SOURCE=='IOS-CHK'),drop=True)
+        cdr_ds=cdr_ds.where(cdr_ds.SOURCE==source,drop=True)    
+    fdate=cdr_ds.FDATE
   
     date=dt.datetime(1900,1,1)+pd.to_timedelta(fdate,unit='days')
-    lat=cdr.LAT.data
-    lon=axutil.lonTo180(cdr.LON.data)
-    vardata=cdr.THICK_ICE_SNOW[:,0].data # Get mean value... not thickness (ice + snow
-    cdr_index=cdr.INDEX.data.astype('int64')
+    lat=cdr_ds.LAT.data
+    lon=axutil.lonTo180(cdr_ds.LON.data)
+    vardata=cdr_ds.THICK_ICE_SNOW[:,0].data # Get mean value... not thickness (ice + snow
+    cdr_index=cdr_ds.INDEX.data.astype('int64')
     pos=np.column_stack((lat,lon))
     
     cdr_data={'cdr_index':cdr_index,'date':date,'pos':np.deg2rad(pos),'thick':vardata}
-    return cdr_data
+    return cdr_data,cdr_ds
 
 def points2pos(points): # helper function to reform that data points. 
     p=list()
@@ -65,7 +69,11 @@ def points2pos(points): # helper function to reform that data points.
 
 def match_points(cdr_data,ds,varnames,ancil_data,dist_thresh=10.):
 #    dist_thresh=10. # 10 km dist threshold
-    OceanMask=ancil_data.OceanMask.rename({"y_sn":"y","x_ew":"x"})
+
+    if "y_sn" in list(ds.coords.keys()): # some of the heff files have Latitude/Longitude as coordinates                                                 # rename
+        OceanMask=ancil_data.OceanMask.rename({"y_sn":"y","x_ew":"x"})
+    else:
+        OceanMask=ancil_data.OceanMask
     omask=OceanMask.data.flatten()
 
     ngrid_pts=ds.lat.size # number of grid points nx,ny 
@@ -112,6 +120,9 @@ def match_points(cdr_data,ds,varnames,ancil_data,dist_thresh=10.):
     odist=dist[dist <=dist_thresh]
 #   create an array of the input positions for the points found within range
     good_pts_pos=np.rad2deg(pos[dist.flatten() <= dist_thresh,:])
+    if good_pts_pos.size == 0: 
+        logging.warning("No good points within the distance %d for source %s",dist_thresh,source)
+        return  -1 
     glat=good_pts_pos[:,0]  # latitude longitudes of input points for which match has been found
     glon=good_pts_pos[:,1]
 # convert linear indexi back to two dimensions 
@@ -143,17 +154,19 @@ def match_points(cdr_data,ds,varnames,ancil_data,dist_thresh=10.):
     h['point_lon']=ar_glon
     h['point_lat']=ar_glat
     h['dist']=ar_dist
-    print(axutil.lonTo180(h.lon.compute().data))
-    print(h.point_lon.data)
+#    print(axutil.lonTo180(h.lon.compute().data))
+#    print(h.point_lon.data)
     
-    print(h.lat.compute().data) # this generates the correct points
-    print(h.point_lat.data)     # but subsampling in time gets weired. 
+#    print(h.lat.compute().data) # this generates the correct points
+#    print(h.point_lat.data)     # but subsampling in time gets weired. 
     # the h data set now how the variable sit as sit(time,points), all 
     # times for each point are selected. The problem now is that 
     # we want to select a different time for each point. 
+    ds.close()
     return h 
 
 def write_points_csv(points):
+    # helper program to write sample test data base
     import csv 
     csv_file='test_points.csv'
     fieldnames = ['id', 'lat', 'lon','yymmdd']
@@ -189,8 +202,26 @@ def read_points_csv(): # smaple cvs reader
                 points[row[0]]=dict(pos={"lat":float(row[1]),"lon":float(row[2])},date=row[3])    
             line += 1             
     return points
-
-def make_points_data(): # generates some random point data for testing 
+def ax_draft2thick(draft,snow,month=None,swe=False):
+#   converts ice thickness to draft using Rothrock et al. 2008
+#   thick= sea ice thickness [m] 
+#   draft =sea ice draft in [m]
+   rho_ice = 928                # ; [kg/m3] ROn
+   rho_water=1027.
+   rho_snow = rho_ice/3.0
+   rho_snow_t=np.array([308,318,327,328,329,348,383,219,246,271,291,301]) 
+#  if the keyword month is set then the snow density is set to vary by
+#  nth.
+   if isinstance(month,np.ndarray): 
+      rho_snow=np.float32(rho_snow_t[month-1])
+   if swe: 
+      thick=rho_water/rho_ice * draft - snow  
+   else:
+      thick=rho_water/rho_ice * draft - rho_snow/rho_ice * snow ; 
+   return thick
+    
+def make_points_data(): # generates some random point data for testing
+    # helper function 
     import csv 
     ancil_file='/home/axel/idl-lib/axel/jz_model/data/liamas/liamas_static_scalar.nc'    
     ancil_data=xr.open_dataset(ancil_file)
@@ -211,20 +242,41 @@ def write_test_points():
     print("Done writing test Points")
 
 
-def test_output_read(output_file,varnames):
-    out=xr.open_dataset(output_file)
+def read_match_pointDB_file(match_pointDB_file,varnames,verbose=False):
+    # reads a netcdf file of point locatiosn/times matched to the corresponding closest model grid cells/times
+    out=xr.open_dataset(match_pointDB_file)
     pdata=out.points.data
-    for n in list(pdata): 
-        print(n)
-        test=out[varnames].sel(points=n)
-        if type(varnames) == str :
-            print(test.data)
-        else: 
-            for var in list(varnames):  # prevent from iterating over letters
-                print(test[var].data)
-    test.close()
+    if verbose:
+        for n in list(pdata): 
+            print(n)
+            test=out[varnames].sel(points=n)
+            if type(varnames) == str :
+                print(test.data)
+            else: 
+                for var in list(varnames):  # prevent from iterating over letters
+                    print(test[var].data)
+        test.close()
     return out
+def draft2thick(obsAndModel):
+    draft_idx=np.where(obsAndModel.DRAFT[:,0] != np.nan )[0] # get indices for draft var
+    draft=obsAndModel.DRAFT[draft_idx,0]
+    month=obsAndModel.obs_time[draft_idx].dt.month.values
+    snow=obsAndModel.sisnthick[draft_idx].data
+    thick= ax_draft2thick(draft,snow,month=month)   
+    obsAndModel.THICK[draft_idx,0]=thick
+    return  obsAndModel
 
+def test_cdr2thickness():
+    cdrfile='/home/axel/projects/sea_ice_cdr/idl/axel_cdr/ncdf_dir/uThickCDR_summaries.20251010_V1.0.nc'
+    cdr=xr.open_dataset(cdrfile)
+    cdr=cdr.where(cdr.SOURCE=='BGEP',drop=True)
+    draft_idx=np.where(cdr.DRAFT[:,0] != np.nan )[0] # get indices for draft var
+    draft=cdr.DRAFT[draft_idx,0]
+    month=cdr.time.dt.month.values
+    snow=np.full_like(draft,0.1) # default snow thickness of 0.1 m 
+    thick= ax_draft2thick(draft,snow,month=month) 
+    cdr.THICK[draft_idx,0]=thick
+    
 def plot_sample():     
     output_file='test_match_airem.heff.nc'
     out=xr.open_dataset(output_file)
@@ -235,89 +287,197 @@ def plot_sample():
         print(n)
         test=out.sel(points=n)[varname]
         test.plot.line(label=n)
-def fix_sea_ice_cdr(): 
-    cdrfile='/home/axel/projects/sea_ice_cdr/idl/axel_cdr/ncdf_dir/uThickCDR_summaries.20250930_V1.0.nc'
-    cdr=xr.open_dataset(cdrfile)
-#    
- 
-#    time=time.swap_dims({"time":"cdr_index"})
-    cdr=cdr.rename_dims({"time":"cdr_index" })
-#    cdr['time']=time.rename_dims({"time":"cdr_index"})
+def scatter_plot(ds,model_name,title=None):
+    # got to figure out whether something is draft, thickness or thickiness and draft
     
-    cdr=cdr.assign_coords({"cdr_index": cdr.INDEX.data.astype('int64')})
-    cdr=cdr.drop_duplicates('cdr_index',keep='first') # ENVISAT are duplicate
-    time=dt.datetime(1900,1,1)+pd.to_timedelta(cdr.FDATE,unit='days')
-    time_array=xr.DataArray(time,dims='cdr_index',coords={'cdr_index':cdr.cdr_index})
-    cdr['time']=time_array                      
-    with ProgressBar():
-        cdr.to_netcdf('/home/axel/projects/sea_ice_cdr/idl/axel_cdr/ncdf_dir/uThickCDR_summaries.20251010_V1.0.nc')
-    return
-    
-def scatter_plot(ds):
     import matplotlib.pyplot as plt
+    import matplotlib.lines as mlines
+    import matplotlib.transforms as mtransforms
+    import statsmodels.api as sm
+    from sklearn.metrics import root_mean_squared_error
+    from sklearn.metrics import mean_squared_error
     import numpy as np
+    if not isinstance(ds,xr.Dataset): # if ds is not a dataset open it as a file
+        ds=xr.open_dataset(ds)
+    ds.load()
     obs_thick=ds.THICK_ICE_SNOW[:,0].data
-    mod_thick=ds.sit.data
-    fig=plt.scatter(obs_thick,mod_thick)
-    plt.xlabel("Observed Thickness")
-    plt.ylabel("Modeled Thickness")
-    plt.title("PIOMAS 5e vs CDR MOSAIC")
-    return fig  
+    mod_thick=ds.sit.data + ds.sisnthick.data
 
-def plot_map():
-    from model_maps_arctic import arctic_map_outline
-    import cartopy.crs as ccrs
+#   obs_thick=ds.THICK[:,0].data
+#   obs_thick=ds.DRAFT[:,0].data
+#   mod_thick=ds.sit.data
+    good_idx=np.where(np.isfinite(obs_thick))[0]
+    mod_thick=mod_thick[good_idx]
+    obs_thick=obs_thick[good_idx]
+    mhas_nan = np.any(np.isnan(mod_thick))
+    ohas_nan = np.any(np.isnan(obs_thick))
+    print(mhas_nan)
+    print(ohas_nan)
     
+    model = sm.OLS(mod_thick, sm.add_constant(obs_thick),missing='drop')
+    results = model.fit()
+    print(results.params)
+    print(results.summary())
+    fig,ax=plt.subplots()
+    ax.scatter(obs_thick,mod_thick)
+    ax.set_xlim(0,10)
+    ax.set_ylim(0,10)
+    plt.xlabel("Observed Thickness [m]")
+    plt.ylabel("Modeled Thickness [m]")
+    if title==None:
+        title=model_name   
+    plt.title(title)
+    line = mlines.Line2D([0, 1], [0, 1], color='red')
+    transform = ax.transAxes
+    line.set_transform(transform)
+    ax.add_line(line)
+    
+    b, m = results.params
+    label= f'$y = {m:.1f}x {b:+.1f}$'
+    ax.axline(xy1=(0, b), slope=m, label=label,color='black')
+    m2err=mean_squared_error(obs_thick,mod_thick)
+    rmse=root_mean_squared_error(obs_thick,mod_thick)
+    meane=np.mean(obs_thick-mod_thick)
+#    ax.legend(fontsize=12)
+    annotation_text = (f'Errors (mean/rms): {meane:.2f}/{rmse:.2f}\n'
+                       f'R² = {results.rsquared:.2f}\n'
+                       f'y = {m:.2f}x + {b:.2f}\n')
+    
+    ax.annotate(annotation_text, xy=(0.05, 0.80), xycoords='axes fraction',
+             fontsize=10, bbox=dict(boxstyle="round,pad=0.3", fc="white", ec="None", lw=1))
+    return fig,ax,results
+def plot_histograms(ds,model_name, title=None): 
+    import numpy as np
+    import matplotlib.pyplot as plt
+    if not isinstance(ds,xr.Dataset): # if ds is not a dataset open it as a file
+        ds=xr.open_dataset(ds)
+    ds.load()
+    obs_thick=ds.THICK_ICE_SNOW[:,0] 
+#    obs_thick=ds.THICK[:,0]
+    mod_thick=ds.sit.data + ds.sisnthick.data 
+    
+#   mod_thick=ds.sit.data
+    fig,(ax0,ax1)=plt.subplots(nrows=2,ncols=1)
+    ax0.hist([obs_thick,mod_thick], bins= 50, range=[0,8], alpha=0.5, label=['Obs', 'Mod'])
+    ax0.legend(loc='upper right')
+    ax0.set_title('Thickness Distributions\n'+title)
+    diff=obs_thick-mod_thick
+    ax1.hist(diff, bins= 50, range=[-3,3], alpha=0.5, label=['Obs-Mod'])
+    ax1.legend(loc='upper right')
+    ax1.set_tile=('Difference (Obs-Mod) ' + title)
+    plt.show()
+    return fig,ax0,ax1
+def scatter_plot_sns(): 
+    import seaborn as sns
+
+#create scatterplot with regression line and confidence interval lines
+    sns.regplot(x, y)
+
+def plot_location_map(ds):
+    # sample to plot locations on a basic map 
+    from model_maps_arctic import arctic_map_outline
+    import cartopy.crs as ccrs 
     ax,fig,gl=arctic_map_outline()
-    ds=xr.open_dataset("matched_cdr.nc")
-#    ax.scatter(ds.lon,ds.lat,markersize=20, color='red',transform=ccrs.PlateCarree())   
+    if isinstance(ds,xr.Dataset)==False :
+        ds=xr.open_dataset(ds)
     ax.scatter(ds.lon,ds.lat, edgecolors='red',facecolors='none',marker='o',transform=ccrs.PlateCarree(),s=2)
     ax.scatter(ds.point_lon,ds.point_lat,marker='+', color='blue',transform=ccrs.PlateCarree(),s=3)
-def make_match_db(): 
+    plt.show()
+def make_input_file_list(model_path,file_varnames=['hiday','snowday']):
+    # creates a list of input file names for the model 
+    # should modify to filter by year range
+    file_list=[]
+    for var in file_varnames: 
+#        print(var)
+        pattern= model_path+var+'.H*.nc'
+#        print(pattern)
+        f=glob.glob(pattern)
+        file_list=file_list+f
+#    print(file_list)
+    return file_list
+
+def make_match_points_db(cdr_data=None,cdr_file=None,
+                         model_path=None,gridName=None,
+                         file_varnames=['hiday','snowday'],
+                         ncdf_varnames=['sit','sisnthidef'],
+                         match_pointDB_file=None,
+                         id=None,source=None,dist_thresh=10.,ds=None): 
+    # main driver program that creates the matchded data base
+    
     logging.basicConfig(stream=sys.stdout,level=logging.INFO)
     logging.info("Start of extraction")
     t0=time.process_time()   
-    ancil_file='/home/axel/idl-lib/axel/jz_model/data/liamas/liamas_static_scalar.nc'
-    ancil_data=xr.open_dataset(ancil_file)
-    input_dir="/data/axel0/model_results/2e/nc/"
-#
-    imvarname='heff'
-    varnames=['sit'] # need to address naming scheme
-    output_file= 'test_match_airem.heff.nc'
-    in_pattern=input_dir+"/"+imvarname+".H[1-2][0-9][0-9][0-9].nc"
-#    in_pattern=input_dir+"/"+imvarname+".H2000.nc"    
-#    in_pattern=input_dir+"/"+imvarname+".H2020.nc"
-#   read points data. Reads a file with locations to extract. (points.csv). 
 
-    cdr_data=read_thickCDR()
-    with ProgressBar(): 
-        ds=xr.open_mfdataset(in_pattern,chunks=({"x":752,"y":240,"time":12*42}))
-#        ds=ds.persist()
-        ds=ds.chunk({'time':12*42}) # no idea if that helps
-        if "Latitude" in list(ds.coords.keys()): # some of the heff files have Latitude/Longitude as coordinates                                                 # rename
-            ds=ds.rename({"Longitude":"lon","Latitude":"lat"})
-#        ds.load() # loads all of it into memory which works on my computer with this 
-#       match the data in points with the data from the closest grid point         
-        pmds = match_points(cdr_data,ds,varnames,ancil_data)
-#       write the matched data to netcdf
-        pmds.to_netcdf(output_file,mode='w')
-        pmds.close()
-        t1=time.process_time()
-        logging.info("Finished writing %s in %5.2f minutes",output_file,(t1-t0)/60.)
-#       print_points(mpoints)        
-    out=test_output_read(output_file,varnames)
-    model_points=out.rename({'points':'cdr_index'})
-    out.close()
-    cdrfile='/home/axel/projects/sea_ice_cdr/idl/axel_cdr/ncdf_dir/uThickCDR_summaries.20251010_V1.0.nc'
-    cdr=xr.open_dataset(cdrfile) 
-    # this version has a bad time variable, too long. 
+    sc,vc,_=im.getAncilData(gridName=gridName)
+    g=im.gridInfo(gridName) 
+    nx=g.nx; ny=g.ny
+    nt=42 # not clear if this is necessary.. This will depend on number of years to match. 
     
+#    in_pattern=model_path+"/"+file_varname+".H[1-2][0-9][0-9][0-9].nc"
+    input_files=make_input_file_list(model_path,file_varnames)
+    xchunk=nx
+    ychunk=ny
+    tchunk=12*nt 
+    if not isinstance(cdr_data,dict):  
+        logging.info("reading CDR data")
+        cdr_data,_=read_thickCDR(source) # may want to do some filtering here. 
+    if not isinstance(ds,xr.Dataset):   # load the model_data set if this isn't done 
+        logging.info("Model Data set will be loaded  %s", source )
+        with ProgressBar(): 
+            ds=xr.open_mfdataset(input_files,chunks=({"x":xchunk,"y":ychunk,"time":tchunk}))
+            ds=ds.chunk({'time':tchunk}) # no idea if that helps, would seem like we are doign this already above
+            if "Latitude" in list(ds.coords.keys()): # some of the heff files have Latitude/Longitude as coordinates                                                 # rename
+                ds=ds.rename({"Longitude":"lon","Latitude":"lat"})   
+    #       match the data in points with the data from the closest grid point         
+    with ProgressBar(): 
+        logging.info("Starting Matching for :  %s",source)
+        pmds = match_points(cdr_data,ds,ncdf_varnames,sc,dist_thresh=dist_thresh)
+        if not isinstance(pmds,xr.Dataset):
+            logging.warning("No good points found for source  %s", source )
+            return -1 
+        else: 
+            pmds.attrs['id']=id
+#   write the matched data to netcdf
+            pmds.to_netcdf(match_pointDB_file,mode='w')
+            ds.close()
+            t1=time.process_time()
+            logging.info("Finished writing %s in %5.2f minutes",match_pointDB_file,(t1-t0)/60.)
+    return pmds
+def load_model_data(model_path,file_varnames,nx,ny,nt):
+   input_files=make_input_file_list(model_path,file_varnames)
+   xchunk=nx
+   ychunk=ny
+   tchunk=12*nt 
+   with ProgressBar(): 
+       ds=xr.open_mfdataset(input_files,chunks=({"x":xchunk,"y":ychunk,"time":tchunk}))
+#        ds=ds.persist()
+       ds=ds.chunk({'time':tchunk}) # no idea if that helps, would seem like we are doign this already above
+       if "Latitude" in list(ds.coords.keys()): # some of the heff files have Latitude/Longitude as coordinates                                                 # rename
+           ds=ds.rename({"Longitude":"lon","Latitude":"lat"})
+   logging.info("Done reading input model_data")
+   return ds
+
+def merge_pointDB_withCDR(cdr_ds=None,cdr_file='/home/axel/projects/sea_ice_cdr/idl/axel_cdr/ncdf_dir/uThickCDR_summaries.20251010_V1.0.nc',
+                          match_pointDB_file='2e.matchDB_airem.heff.nc',merged_cdr_model_file='2e.heff.airem.merged_cdr.nc',
+                          ncdf_varnames=['hiday','snowday'],source=None):
+    logging.basicConfig(stream=sys.stdout,level=logging.INFO)
+    logging.info("Start of merging")
+    t0=time.process_time()
+    model_points=read_match_pointDB_file(match_pointDB_file,ncdf_varnames)
+    model_points=model_points.rename({'points':'cdr_index'})
+    
+    if not isinstance(cdr_ds,xr.Dataset):
+        cdr_ds=xr.open_dataset(cdr_file)
+        if not source == None:
+            cdr_ds=cdr_cds.where(cdr_ds.SOURCE==source,drop=True)
+        logging.info("Reading CDR frome file")    
     # select the points in the observation data that correspond to the 
     # matched points... This is so we don't have to pass all data into 
     # the points matching data base. 
-    
+
     msel=model_points.cdr_index
-    mcdr=cdr.sel(cdr_index=msel.cdr_index.data) 
+    mcdr=cdr_ds.sel(cdr_index=msel.cdr_index.data) 
+    mcdr.attrs['id']=model_points.attrs['id']
 #    out=model_points.rename({'points':'cdr_index'})
 #    model_points=model_points.reset_coords(names='time')
     model_points=model_points.rename({'time':'model_time'})
@@ -325,27 +485,141 @@ def make_match_db():
     obsAndModel=xr.merge([mcdr,model_points])
     model_time=obsAndModel.model_time
     obs_time=obsAndModel.obs_time
-    diff_time=(model_time-obs_time).dt.s=days
-#    model_time=pd.to_datetime(obsAndModel.model_time)
-#    obs_time=pd.to_datetime(obsAndModel.obs_time)
-#    .to_pydatetime()
-    good_idx=np.where(np.abs(diff_day) < 15)
-    obsAndModel=obsAndModel.isel(cdr_index=good_idx)
-    obsAndModel=obsAndModel.reset_coords(names=['lat','lon'])
-    obsAndModel.to_netcdf("matched_cdr.nc")
-    
-    obs_thick=obsAndModel.THICK_ICE_SNOW[:,0].data
-    mod_thick=obsAndModel.sit.data
-    obs_lat=obsAndModel.point_lat
-    obs_lon=obsAndModel.point_lon
-    mod_lat=obsAndModel.lat
-    mod_lon=obsAndModel.lon
-    
+    diff_time=(model_time-obs_time).dt.days
+
+    good_idx=np.where(np.abs(diff_time) < 15)[0] # tuple with one array per dimension hence select [0]
+    #print("number of good elements: ", good_idx.size)
+    if good_idx.size > 0 : 
+        obsAndModel=obsAndModel.isel(cdr_index=good_idx) # is that really true
+        obsAndModel=obsAndModel.reset_coords(names=['lat','lon'])
+        obsAndModel.to_netcdf(merged_cdr_model_file)  
+        t1=time.process_time()
+        logging.info("Finished writing %s in %5.2f minutes",merged_cdr_model_file,(t1-t0)/60.)
+    else:
+        logging.info("No matched data for %s : ", source)
+    model_points.close()
+    mcdr.close()
+    cdr.close()
+    return obsAndModel
+
 if __name__ == "__main__":
-    make_match_db()
-    #plot_map()
-    ds=xr.open_dataset("matched_cdr.nc")
-    scatter_plot(ds)
+    logging.basicConfig(stream=sys.stdout,level=logging.INFO)
+    cdr_file='/home/axel/projects/sea_ice_cdr/idl/axel_cdr/ncdf_dir/uThickCDR_summaries.20251010_V1.0.nc'
+    """
+    gridName='912X672'
+    model_id='1c'
+    model_group='capmas'
+    dist_thresh=10.
+    nt=44
+    file_varnames=['heff','snow']
+    model_path="/data/axel0/model_results/capmas/1c/nc/"
+    """
+
+    """
+    gridName='912X672'
+    model_id='2c'
+    model_group='capmas'
+    dist_thresh=10.
+    nt=21
+    file_varnames=['heff','snow']
+    model_path="/data/axel0/model_results/capmas/2c/nc/"
+    """
+    """
+    #   model_path="/data/axel0/model_results/2e/nc/"
+    #   gridName='752X240
+    """
+    """
+    gridName='360X120'   
+    model_group=''
+    model_id='2cfs1'
+    dist_thresh=25. # maximum between grid cell center and observation
+    file_varnames=['hiday','snowday'] 
+    nt=46
+    """
+    """
+    gridName='360X120'   
+    model_group=''
+    model_id='2sstC'
+    dist_thresh=25. # maximum between grid cell center and observation
+    nt=46
+    file_varnames=['hiday','snowday']    
+    model_path="/data/axel0/model_results/2sst/nc/"
+    """
+    gridName='360X120'   
+    model_group=''
+    model_id='3sst'
+    dist_thresh=25. # maximum between grid cell center and observation
+    nt=46
+    file_varnames=['hiday','snowday']    
+    model_path="/data/axel0/model_results/"+model_id+"/nc/"
+    
+    g=im.gridInfo(gridName) 
+    nx=g.nx; ny=g.ny
+    model_path="/data/axel0/model_results/"+model_group+"/"+model_id+"/nc/"
+    output_root="/home/axel/ax_python_lib/thickCDR/extractDir/"
+#   this is the directory where the output is located 
+    output_path=output_root+ "/"+gridName+"/"+model_id+"/"
+    if not (os.path.isdir(output_path)): 
+        logging.info("Extraction Directory: %s doesn't exists will be made",output_path)
+        os.makedirs(output_path,exist_ok=True)
+
+#   Below is constant for thickness extractions 
+    ncdf_varnames=['sit','sisnthick']
+#   open the CDR file and get all the sources 
+    cdr=xr.open_dataset(cdr_file)
+    sources=np.unique(cdr.SOURCE.values).tolist()
+    cdr.close()
+#    sources=['BGEP','CryoSat-AWI','IOS-CHK','IOS-EBS','IceBridge-QL','IceBridge-V2','NPEO']
+#    sources=['CryoSat-AWI']
+    sources.remove('AWI-WS')
+    sources.remove('USSUB-HI')
+#    print(sources)
+    match=True
+    merge=True
+#   sources=sources[0:2]
+    for source in sources: 
+        print(source)
+        id= model_id +"_"  + source # name used for identifcation inside of file 
+        cdr_data,cdr_ds=read_thickCDR(source=source) 
+        logging.info("Done reading cdr_data for %s: ",source)
+#        cdr_ds=cdr.where(cdr.SOURCE==source,drop=True)
+                    
+        match_pointDB_file=output_path + model_id+'.matchDB.'+source+"." +file_varnames[0]+"."+file_varnames[1]+'.nc'
+        merged_cdr_model_file=output_path + model_id+'.merged.'+source+'.'+file_varnames[0]+"."+file_varnames[1]+'.nc'
+        model_ds=load_model_data(model_path,file_varnames,nx,ny,nt)
+        if match:
+            pmds=make_match_points_db(cdr_data=cdr_data,cdr_file=cdr_file,
+                                      model_path=model_path,
+                                      gridName=gridName,file_varnames=file_varnames,
+                                      ncdf_varnames=ncdf_varnames,
+                                      match_pointDB_file=match_pointDB_file,
+                                      id=id,source=source,
+                                      dist_thresh=dist_thresh,ds=model_ds)    
+            
+            if not isinstance(pmds,xr.Dataset):
+                logging.info("skipping: %s ",source)
+                continue
+            pmds.close()
+        if merge:
+            obsAndModel=merge_pointDB_withCDR(cdr_ds=cdr_ds,cdr_file=cdr_file,match_pointDB_file=match_pointDB_file,
+                                             merged_cdr_model_file=merged_cdr_model_file,
+                                             ncdf_varnames=ncdf_varnames,source=source)
+            cdr_ds.close()
+ #      pmds.close()
+ #       obsAndModel.close()
+    #   else:
+#        obsAndModel=xr.open_dataset(merged_cdr_model_file)
+
+#    test_cdr2thickness()
+#    plot_location_map(obsAndModel)
+#    title=obsAndModel.attrs['id']
+#   obsAndModel=draft2thick(obsAndModel)
+    
+#   print(title)
+#    fig,ax,results=scatter_plot(obsAndModel,model_name, title=title)
+#    fig,ax0,ax1= plot_histograms(obsAndModel,model_name, title=title)
+#    obsAndModel.close()
+#    pmds.close()
 #    main()
     
     
