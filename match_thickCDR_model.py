@@ -28,9 +28,30 @@ import axutil
 import pandas as pd
 import ax_im_utils as im
 #import xoak
+def preprocess_ObsAndModel(ds): 
+    ds=ds.sortby('cdr_index')
+    return ds 
 
-def read_thickCDR(source=None): 
-    cdrfile='/home/axel/projects/sea_ice_cdr/idl/axel_cdr/ncdf_dir/uThickCDR_summaries.20251010_V1.0.nc'
+def readMerged(model_id,gridName,sources=None,
+               input_root="/home/axel/ax_python_lib/thickCDR/extractDir/"): 
+    # reads merged cdr and extraction files for sources. 
+    # not DONE fixed model and data 
+#    model_id='2cfs1'
+#    gridName='360X120'
+ 
+    files=select_source_files(model_id,gridName,sources=sources,
+                              input_root= "/home/axel/ax_python_lib/thickCDR/extractDir/")
+    #infile= input_dir+'1c.merged.AIR-EM.heff.snow.nc'
+    obsAndModel=xr.open_mfdataset(files,preprocess=preprocess_ObsAndModel)
+    
+#    subset=obsAndModel.where(obsAndModel.SOURCE==select_source,drop=True)
+#    sources = list(set(subset.SOURCE.data.tolist()))
+#    print(sources)   
+#    title=model_id +":" + select_source 
+    return obsAndModel
+
+def read_thickCDR(source=None,cdrfile='/home/axel/projects/sea_ice_cdr/idl/axel_cdr/ncdf_dir/uThickCDR_summaries.20251010_V1.0.nc'): 
+#   reads CDR file. If source is specified a particular data source is extracted.  
     cdr_ds=xr.open_dataset(cdrfile)
     sources=np.unique(cdr_ds.SOURCE.values)
     if not source==None:         
@@ -47,7 +68,7 @@ def read_thickCDR(source=None):
     vardata=cdr_ds.THICK_ICE_SNOW[:,0].data # Get mean value... not thickness (ice + snow
     cdr_index=cdr_ds.INDEX.data.astype('int64')
     pos=np.column_stack((lat,lon))
-    
+#   create a dictionary with the data    
     cdr_data={'cdr_index':cdr_index,'date':date,'pos':np.deg2rad(pos),'thick':vardata}
     return cdr_data,cdr_ds
 
@@ -68,7 +89,8 @@ def points2pos(points): # helper function to reform that data points.
     return pos,id_list,time_list 
 
 def match_points(cdr_data,ds,varnames,ancil_data,dist_thresh=10.):
-#    dist_thresh=10. # 10 km dist threshold
+#   finds closest points in model data provide in ds and points provided in cdr_data
+#   points further away than dist_thresh are not matched.     
 
     if "y_sn" in list(ds.coords.keys()): # some of the heff files have Latitude/Longitude as coordinates                                                 # rename
         OceanMask=ancil_data.OceanMask.rename({"y_sn":"y","x_ew":"x"})
@@ -219,6 +241,25 @@ def ax_draft2thick(draft,snow,month=None,swe=False):
    else:
       thick=rho_water/rho_ice * draft - rho_snow/rho_ice * snow ; 
    return thick
+def ax_thick2draft(thick,snow,month=None,swe=False): 
+
+#   if keyword set swe then convert swater equivalent to snow depth
+#   input netcdf files have converted SWE to snow depth by multiplying 
+#   by a scaler of 3. (ax_im_varinfo.py)
+    rho_ice = 928  
+    rho_water=1027.
+    rho_fw = 1000. 
+    rho_snow = rho_ice/3.0
+    rho_snow_t=np.array([308,318,327,328,329,348,383,219,246,271,291,301]) 
+    if isinstance(month,np.ndarray): 
+        rho_snow=np.float32(rho_snow_t[month-1])
+    # if swe is set the use as snow water equivalent
+    if swe: 
+       draft= (thick + snow) * rho_ice/rho_water
+    else:
+       stemp= snow  * rho_fw/rho_snow  # convert to snow depth
+       draft= (thick + stemp)* rho_ice/rho_water
+    return draft
     
 def make_points_data(): # generates some random point data for testing
     # helper function 
@@ -258,7 +299,7 @@ def read_match_pointDB_file(match_pointDB_file,varnames,verbose=False):
         test.close()
     return out
 def draft2thick(obsAndModel):
-    draft_idx=np.where(obsAndModel.DRAFT[:,0] != np.nan )[0] # get indices for draft var
+    draft_idx=np.where(~np.isnan(obsAndModel.DRAFT[:,0])) # get indices for draft var
     draft=obsAndModel.DRAFT[draft_idx,0]
     month=obsAndModel.obs_time[draft_idx].dt.month.values
     snow=obsAndModel.sisnthick[draft_idx].data
@@ -266,11 +307,72 @@ def draft2thick(obsAndModel):
     obsAndModel.THICK[draft_idx,0]=thick
     return  obsAndModel
 
+def thick2draft(obsAndModel):
+# converts ice thickness to draft using Rothrock et al. 2008
+#   thick=thickness in meters,draft in meters, snow thickness in m
+
+    idx=np.where(~np.isnan(obsAndModel.THICK[:,0])) # get indices for draft var
+    thick=obsAndModel.THICK[idx,0]
+    month=obsAndModel.obs_time[idx].dt.month.values
+    snow=obsAndModel.sisnthick[draft_idx].data
+    draft=ax_thick2draft(thick,snow,month=month)
+    obsAndModel.DRAFT[idx,0]=draft
+    return obsAndModel
+
+def toThick(obsAndModel):
+    # compute thickness, draft and THCKE_ICE_SNOW for sources that don't have them
+    month=obsAndModel.obs_time.dt.month.values
+    snow=obsAndModel.sisnthick.data
+    
+    thick_idx=np.where(~np.isnan(obsAndModel.THICK[:,0]))[0]# get indices for sources with thickness
+    draft_idx=np.where(~np.isnan(obsAndModel.DRAFT[:,0]))[0] # get indices for sources with draft
+    iAs_idx=np.where(~np.isnan(obsAndModel.THICK_ICE_SNOW[:,0]))[0] # get indices for sources with draft
+    
+    draft=obsAndModel.DRAFT[:,0]
+    thick=obsAndModel.THICK[:,0]
+    thick_ice_snow=obsAndModel.THICK_ICE_SNOW[:,0]
+    
+    draft_tmp=ax_thick2draft(thick,snow,month=month) # nan where no thickness
+    thick_tmp=ax_draft2thick(draft,snow,month=month) # nan where no draft
+    
+#   compute draft where thickness is provided
+    obsAndModel.DRAFT[thick_idx,0]=draft_tmp[thick_idx]
+#   compute thickness where draft is provided 
+    obsAndModel.THICK[draft_idx,0]=thick_tmp[draft_idx]
+    
+    
+#   compute thickness for AIR-EM data     
+    obsAndModel.THICK[iAs_idx,0]= \
+        obsAndModel.THICK_ICE_SNOW[iAs_idx,0]-snow[iAs_idx]
+
+#   compute draft for AIR-EM data     
+    obsAndModel.DRAFT[iAs_idx,0]= \
+        ax_thick2draft(thick_ice_snow[iAs_idx]-snow[iAs_idx],snow[iAs_idx],month=month[iAs_idx])
+    
+    
+#   concatenate draft_idx and thick_idx and for those locations compute THICK_SNOW_ICE
+#   using either measured or computed thickness 
+
+    c=np.append(draft_idx,thick_idx)
+    print(c.size)
+    obsAndModel.THICK_ICE_SNOW[c,0]= obsAndModel.THICK[c,0] + snow[c]
+    logging.info("Number of missing Draft values : %d",obsAndModel.DRAFT[:,0].isnull().sum().item())
+    logging.info("Number of missing THICK values : %d",obsAndModel.THICK[:,0].isnull().sum().item())
+    logging.info("Number of missing THICK_ICE_SNOW values : %d",obsAndModel.THICK_ICE_SNOW[:,0].isnull().sum().item())
+    
+    missing_mask=obsAndModel.THICK[:,0].isnull()
+    missing_coords = obsAndModel.where(missing_mask, drop=True).coords
+
+    print("\nCoordinates of Missing Values:")
+    for dim, coord in missing_coords.items():
+        print(f"{dim}: {coord.values}")
+    return obsAndModel
+
 def test_cdr2thickness():
     cdrfile='/home/axel/projects/sea_ice_cdr/idl/axel_cdr/ncdf_dir/uThickCDR_summaries.20251010_V1.0.nc'
     cdr=xr.open_dataset(cdrfile)
     cdr=cdr.where(cdr.SOURCE=='BGEP',drop=True)
-    draft_idx=np.where(cdr.DRAFT[:,0] != np.nan )[0] # get indices for draft var
+    draft_idx=np.where(~np.isnan(cdr.DRAFT[:,0] )) # get indices for draft var
     draft=cdr.DRAFT[draft_idx,0]
     month=cdr.time.dt.month.values
     snow=np.full_like(draft,0.1) # default snow thickness of 0.1 m 
@@ -300,12 +402,12 @@ def scatter_plot(ds,model_name,title=None):
     if not isinstance(ds,xr.Dataset): # if ds is not a dataset open it as a file
         ds=xr.open_dataset(ds)
     ds.load()
-    obs_thick=ds.THICK_ICE_SNOW[:,0].data
-    mod_thick=ds.sit.data + ds.sisnthick.data
+#    obs_thick=ds.THICK_ICE_SNOW[:,0].data
+#    mod_thick=ds.sit.data + ds.sisnthick.data
 
-#   obs_thick=ds.THICK[:,0].data
+    obs_thick=ds.THICK[:,0].data
 #   obs_thick=ds.DRAFT[:,0].data
-#   mod_thick=ds.sit.data
+    mod_thick=ds.sit.data
     good_idx=np.where(np.isfinite(obs_thick))[0]
     mod_thick=mod_thick[good_idx]
     obs_thick=obs_thick[good_idx]
@@ -353,10 +455,8 @@ def plot_histograms(ds,model_name, title=None):
         ds=xr.open_dataset(ds)
     ds.load()
     obs_thick=ds.THICK_ICE_SNOW[:,0] 
-#    obs_thick=ds.THICK[:,0]
-    mod_thick=ds.sit.data + ds.sisnthick.data 
-    
-#   mod_thick=ds.sit.data
+    obs_thick=ds.THICK[:,0]
+    mod_thick=ds.sit.data
     fig,(ax0,ax1)=plt.subplots(nrows=2,ncols=1)
     ax0.hist([obs_thick,mod_thick], bins= 50, range=[0,8], alpha=0.5, label=['Obs', 'Mod'])
     ax0.legend(loc='upper right')
@@ -372,7 +472,30 @@ def scatter_plot_sns():
 
 #create scatterplot with regression line and confidence interval lines
     sns.regplot(x, y)
+    
+def select_source_files(model_id,gridName,
+                        input_root="/home/axel/ax_python_lib/thickCDR/extractDir/"
+                        ,sources=None):
+    print(sources)
+    file_list=[]
+    input_dir=input_root+gridName+"/"+model_id +"/"
+#    print(sources)
+    if sources==None: 
+        pattern=input_dir+model_id+".merged*.nc" 
+#        print(pattern)
+        files=glob.glob(pattern)
+        return files
+    if not isinstance(sources,list): 
+        sources=[sources]
+    for source in sources: 
+        print(source)
+        pattern=input_dir+model_id+".merged."+source+"*.nc"
+        files=glob.glob(pattern)
+        file_list=file_list+files
+    return file_list
 
+
+        
 def plot_location_map(ds):
     # sample to plot locations on a basic map 
     from model_maps_arctic import arctic_map_outline
@@ -413,7 +536,6 @@ def make_match_points_db(cdr_data=None,cdr_file=None,
     nx=g.nx; ny=g.ny
     nt=42 # not clear if this is necessary.. This will depend on number of years to match. 
     
-#    in_pattern=model_path+"/"+file_varname+".H[1-2][0-9][0-9][0-9].nc"
     input_files=make_input_file_list(model_path,file_varnames)
     xchunk=nx
     ychunk=ny
@@ -460,6 +582,7 @@ def load_model_data(model_path,file_varnames,nx,ny,nt):
 def merge_pointDB_withCDR(cdr_ds=None,cdr_file='/home/axel/projects/sea_ice_cdr/idl/axel_cdr/ncdf_dir/uThickCDR_summaries.20251010_V1.0.nc',
                           match_pointDB_file='2e.matchDB_airem.heff.nc',merged_cdr_model_file='2e.heff.airem.merged_cdr.nc',
                           ncdf_varnames=['hiday','snowday'],source=None):
+    # merges extracted points back into the thickness CDR data structure so that we have access to all the variables
     logging.basicConfig(stream=sys.stdout,level=logging.INFO)
     logging.info("Start of merging")
     t0=time.process_time()
@@ -499,10 +622,11 @@ def merge_pointDB_withCDR(cdr_ds=None,cdr_file='/home/axel/projects/sea_ice_cdr/
         logging.info("No matched data for %s : ", source)
     model_points.close()
     mcdr.close()
-    cdr.close()
+    cdr_ds.close()
     return obsAndModel
 
-if __name__ == "__main__":
+def driver(): 
+    # main driver program. Edit as needed. 
     logging.basicConfig(stream=sys.stdout,level=logging.INFO)
     cdr_file='/home/axel/projects/sea_ice_cdr/idl/axel_cdr/ncdf_dir/uThickCDR_summaries.20251010_V1.0.nc'
     """
@@ -605,23 +729,12 @@ if __name__ == "__main__":
                                              merged_cdr_model_file=merged_cdr_model_file,
                                              ncdf_varnames=ncdf_varnames,source=source)
             cdr_ds.close()
- #      pmds.close()
- #       obsAndModel.close()
-    #   else:
-#        obsAndModel=xr.open_dataset(merged_cdr_model_file)
-
-#    test_cdr2thickness()
-#    plot_location_map(obsAndModel)
-#    title=obsAndModel.attrs['id']
-#   obsAndModel=draft2thick(obsAndModel)
+        return 
     
-#   print(title)
-#    fig,ax,results=scatter_plot(obsAndModel,model_name, title=title)
-#    fig,ax0,ax1= plot_histograms(obsAndModel,model_name, title=title)
-#    obsAndModel.close()
-#    pmds.close()
-#    main()
-    
+if __name__ == "__main__":
+    #driver()
+    subset=readMerged(source='BGEP')
+    test=toThick(subset)
     
     
     

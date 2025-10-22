@@ -13,6 +13,7 @@ sys.path.append('/home/axel/ax_python_lib/im')
 import pandas as pd
 import datetime as dt
 
+
 sys.path.append('/home/axel/ax_python_lib/axel_utilities')
 def fix_thickCDR(): 
     # I needed to fix the default version created by IDL to remove duplicates for ENVISAT
