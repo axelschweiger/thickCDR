@@ -1,4 +1,4 @@
-#!/usr/bin/env pangeo312_mamba
+#!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
 Created on Tue Nov 30 14:35:33 2021
@@ -38,9 +38,9 @@ def readMerged(model_id,gridName,sources=None,
     # not DONE fixed model and data 
 #    model_id='2cfs1'
 #    gridName='360X120'
- 
+    print("Reading data from ",input_root)
     files=select_source_files(model_id,gridName,sources=sources,
-                              input_root= "/home/axel/ax_python_lib/thickCDR/extractDir/")
+                              input_root= input_root)
     #infile= input_dir+'1c.merged.AIR-EM.heff.snow.nc'
     obsAndModel=xr.open_mfdataset(files,preprocess=preprocess_ObsAndModel)
     
@@ -389,7 +389,7 @@ def plot_sample():
         print(n)
         test=out.sel(points=n)[varname]
         test.plot.line(label=n)
-def scatter_plot(ds,model_name,title=None):
+def scatter_plot(ds,model_name,title=None,max_thick=10.,draft=False):
     # got to figure out whether something is draft, thickness or thickiness and draft
     
     import matplotlib.pyplot as plt
@@ -404,10 +404,17 @@ def scatter_plot(ds,model_name,title=None):
     ds.load()
 #    obs_thick=ds.THICK_ICE_SNOW[:,0].data
 #    mod_thick=ds.sit.data + ds.sisnthick.data
-
-    obs_thick=ds.THICK[:,0].data
+    if draft==False: 
+        obs_thick=ds.THICK[:,0].data
+        mod_thick=ds.sit.data
+    else:
+        # this uses draft as a comparison. Model draft computed from snow and assumed densities. 
+        month=ds.obs_time.dt.month.values
+        snow=ds.sisnthick.data
+        obs_thick=ds.DRAFT[:,0].data        
+        mod_thick= ax_thick2draft(ds.sit.data,snow,month=month) 
 #   obs_thick=ds.DRAFT[:,0].data
-    mod_thick=ds.sit.data
+   
     good_idx=np.where(np.isfinite(obs_thick))[0]
     mod_thick=mod_thick[good_idx]
     obs_thick=obs_thick[good_idx]
@@ -422,8 +429,8 @@ def scatter_plot(ds,model_name,title=None):
     print(results.summary())
     fig,ax=plt.subplots()
     ax.scatter(obs_thick,mod_thick)
-    ax.set_xlim(0,10)
-    ax.set_ylim(0,10)
+    ax.set_xlim(0,max_thick)
+    ax.set_ylim(0,max_thick)
     plt.xlabel("Observed Thickness [m]")
     plt.ylabel("Modeled Thickness [m]")
     if title==None:
@@ -454,7 +461,7 @@ def plot_histograms(ds,model_name, title=None):
     if not isinstance(ds,xr.Dataset): # if ds is not a dataset open it as a file
         ds=xr.open_dataset(ds)
     ds.load()
-    obs_thick=ds.THICK_ICE_SNOW[:,0] 
+#    obs_thick=ds.THICK_ICE_SNOW[:,0] 
     obs_thick=ds.THICK[:,0]
     mod_thick=ds.sit.data
     fig,(ax0,ax1)=plt.subplots(nrows=2,ncols=1)
@@ -628,7 +635,8 @@ def merge_pointDB_withCDR(cdr_ds=None,cdr_file='/home/axel/projects/sea_ice_cdr/
 def driver(): 
     # main driver program. Edit as needed. 
     logging.basicConfig(stream=sys.stdout,level=logging.INFO)
-    cdr_file='/home/axel/projects/sea_ice_cdr/idl/axel_cdr/ncdf_dir/uThickCDR_summaries.20251010_V1.0.nc'
+#    cdr_file='/home/axel/projects/sea_ice_cdr/idl/axel_cdr/ncdf_dir/uThickCDR_summaries.20251010_V1.0.nc'
+    cdr_file='/home/axel/projects/sea_ice_cdr/idl/axel_cdr/ncdf_dir/uThickCDR_summaries.20190920_V3.0.nc'
     """
     gridName='912X672'
     model_id='1c'
@@ -660,7 +668,7 @@ def driver():
     file_varnames=['hiday','snowday'] 
     nt=46
     """
-    """
+
     gridName='360X120'   
     model_group=''
     model_id='2sstC'
@@ -668,6 +676,7 @@ def driver():
     nt=46
     file_varnames=['hiday','snowday']    
     model_path="/data/axel0/model_results/2sst/nc/"
+    
     """
     gridName='360X120'   
     model_group=''
@@ -676,11 +685,12 @@ def driver():
     nt=46
     file_varnames=['hiday','snowday']    
     model_path="/data/axel0/model_results/"+model_id+"/nc/"
-    
+    """
     g=im.gridInfo(gridName) 
     nx=g.nx; ny=g.ny
     model_path="/data/axel0/model_results/"+model_group+"/"+model_id+"/nc/"
-    output_root="/home/axel/ax_python_lib/thickCDR/extractDir/"
+#   Trying to use 2019 netcdf version to see if there are big changes in CS2
+    output_root="/home/axel/ax_python_lib/thickCDR/extractDir_2019v/"
 #   this is the directory where the output is located 
     output_path=output_root+ "/"+gridName+"/"+model_id+"/"
     if not (os.path.isdir(output_path)): 
@@ -697,14 +707,14 @@ def driver():
 #    sources=['CryoSat-AWI']
     sources.remove('AWI-WS')
     sources.remove('USSUB-HI')
-#    print(sources)
+    print(sources)
     match=True
     merge=True
 #   sources=sources[0:2]
     for source in sources: 
         print(source)
         id= model_id +"_"  + source # name used for identifcation inside of file 
-        cdr_data,cdr_ds=read_thickCDR(source=source) 
+        cdr_data,cdr_ds=read_thickCDR(source=source,cdrfile=cdr_file) 
         logging.info("Done reading cdr_data for %s: ",source)
 #        cdr_ds=cdr.where(cdr.SOURCE==source,drop=True)
                     
@@ -729,12 +739,12 @@ def driver():
                                              merged_cdr_model_file=merged_cdr_model_file,
                                              ncdf_varnames=ncdf_varnames,source=source)
             cdr_ds.close()
-        return 
+    return 
     
 if __name__ == "__main__":
-    #driver()
-    subset=readMerged(source='BGEP')
-    test=toThick(subset)
+    driver()
+#    subset=readMerged(source='BGEP')
+#    test=toThick(subset)
     
     
     

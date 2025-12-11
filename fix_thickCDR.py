@@ -19,7 +19,8 @@ def fix_thickCDR():
     # I needed to fix the default version created by IDL to remove duplicates for ENVISAT
     # and rename the index from time to cdr_index. I should do that in the IDL script 
     # that creates the data
-    cdrfile='/home/axel/projects/sea_ice_cdr/idl/axel_cdr/ncdf_dir/uThickCDR_summaries.20250930_V1.0.nc'
+#    cdrfile='/home/axel/projects/sea_ice_cdr/idl/axel_cdr/ncdf_dir/uThickCDR_summaries.20250930_V1.0.nc'
+    cdrfile='/home/axel/projects/sea_ice_cdr/idl/axel_cdr/ncdf_dir/uThickCDR_summaries.20190920_V2.0.nc'
     cdr=xr.open_dataset(cdrfile)
 #    
  
@@ -33,7 +34,8 @@ def fix_thickCDR():
     time_array=xr.DataArray(time,dims='cdr_index',coords={'cdr_index':cdr.cdr_index})
     cdr['time']=time_array                      
     with ProgressBar():
-        cdr.to_netcdf('/home/axel/projects/sea_ice_cdr/idl/axel_cdr/ncdf_dir/uThickCDR_summaries.20251010_V1.0.nc')
+#        cdr.to_netcdf('/home/axel/projects/sea_ice_cdr/idl/axel_cdr/ncdf_dir/uThickCDR_summaries.20251010_V1.0.nc')
+         cdr.to_netcdf('/home/axel/projects/sea_ice_cdr/idl/axel_cdr/ncdf_dir/uThickCDR_summaries.20190920_V3.0.nc')
     return
 
 if __name__ == "__main__":
