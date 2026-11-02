@@ -803,12 +803,11 @@ def extract_all(model_id,model_path,gridName,file_varnames,ncdf_varnames=['sit',
 RUNS={
     '1c':   dict(gridName='912X672',model_group='912X672',dist_thresh=10.,nt=44,file_varnames=['heff','snow']),
     '2c':   dict(gridName='912X672',model_group='912X672',dist_thresh=10.,nt=21,file_varnames=['heff','snow']),
-    '2g':   dict(gridName='752X240',model_group='',dist_thresh=10.,nt=76,file_varnames=['hiday','snowday']),
-    '1e':   dict(gridName='752X240',model_group='',dist_thresh=25.,nt=44,file_varnames=['heff','snow']), # no daily snow
-    '2cfs1':dict(gridName='360X120',model_group='',dist_thresh=25.,nt=46,file_varnames=['hiday','snowday']),
-    '2sstC':dict(gridName='360X120',model_group='',dist_thresh=25.,nt=46,file_varnames=['hiday','snowday'],
-                 model_path="/data/axel0/model_results/2sst/nc/"),
-    '3sst': dict(gridName='360X120',model_group='',dist_thresh=25.,nt=46,file_varnames=['hiday','snowday']),
+    '2g':   dict(gridName='752X240',model_group='752X240',dist_thresh=10.,nt=76,file_varnames=['hiday','snowday']),
+    '1e':   dict(gridName='752X240',model_group='752X240',dist_thresh=25.,nt=44,file_varnames=['heff','snow']), # no daily snow
+    '2cfs1':dict(gridName='360X120',model_group='360X120',dist_thresh=25.,nt=46,file_varnames=['hiday','snowday']),
+    '2sstC':dict(gridName='360X120',model_group='360X120',dist_thresh=25.,nt=47,file_varnames=['hiday','snowday']), # public PIOMAS
+    '3sst': dict(gridName='360X120',model_group='360X120',dist_thresh=25.,nt=46,file_varnames=['hiday','snowday']), # no snowday nc as of 2026-11-02
     # GIOMAS: Arctic cells are ~27-33 km (median), up to ~45 km, so a larger threshold than 360X120
     '2cfs': dict(gridName='360X276',model_group='360X276',dist_thresh=35.,nt=47,file_varnames=['hiday','snowday']),
     }
