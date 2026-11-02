@@ -487,10 +487,14 @@ def scatter_plot(ds,model_name,title=None,max_thick=10.,draft=False):
     ax.annotate(annotation_text, xy=(0.05, 0.80), xycoords='axes fraction',
              fontsize=10, bbox=dict(boxstyle="round,pad=0.3", fc="white", ec="None", lw=1))
     return fig,ax,results
-def source_stats(ds,draft=False):
+def source_stats(ds,draft=False,ice_snow=False):
     # table of model vs observation statistics by source (+ ALL), after toThick()
     # draft=True compares draft (model draft from sit, snow and month as in scatter_plot)
-    if draft:
+    # ice_snow=True compares ice+snow thickness (model sit+sisnthick), e.g. for AIR-EM
+    if ice_snow:
+        obs=ds.THICK_ICE_SNOW[:,0].values
+        mod=ds.sit.values+ds.sisnthick.values
+    elif draft:
         obs=ds.DRAFT[:,0].values
         mod=ax_thick2draft(ds.sit.values,ds.sisnthick.values,month=ds.obs_time.dt.month.values)
     else:
@@ -801,15 +805,15 @@ def extract_all(model_id,model_path,gridName,file_varnames,ncdf_varnames=['sit',
 # /data/axel0/model_results/<model_group>/<model_id>/nc/
 # file_varnames: ['heff','snow'] = monthly, ['hiday','snowday'] = daily
 RUNS={
-    '1c':   dict(gridName='912X672',model_group='912X672',dist_thresh=10.,nt=44,file_varnames=['heff','snow']),
-    '2c':   dict(gridName='912X672',model_group='912X672',dist_thresh=10.,nt=21,file_varnames=['heff','snow']),
-    '2g':   dict(gridName='752X240',model_group='752X240',dist_thresh=10.,nt=76,file_varnames=['hiday','snowday']),
-    '1e':   dict(gridName='752X240',model_group='752X240',dist_thresh=25.,nt=44,file_varnames=['heff','snow']), # no daily snow
-    '2cfs1':dict(gridName='360X120',model_group='360X120',dist_thresh=25.,nt=46,file_varnames=['hiday','snowday']),
-    '2sstC':dict(gridName='360X120',model_group='360X120',dist_thresh=25.,nt=47,file_varnames=['hiday','snowday']), # public PIOMAS
-    '3sst': dict(gridName='360X120',model_group='360X120',dist_thresh=25.,nt=46,file_varnames=['hiday','snowday']), # no snowday nc as of 2026-11-02
+    '1c':   dict(model='CAPMAS',gridName='912X672',model_group='912X672',dist_thresh=10.,nt=44,file_varnames=['heff','snow']),
+    '2c':   dict(model='CAPMAS',gridName='912X672',model_group='912X672',dist_thresh=10.,nt=21,file_varnames=['heff','snow']),
+    '2g':   dict(model='BIOMAS',gridName='752X240',model_group='752X240',dist_thresh=10.,nt=76,file_varnames=['hiday','snowday']),
+    '1e':   dict(model='BIOMAS',gridName='752X240',model_group='752X240',dist_thresh=25.,nt=44,file_varnames=['heff','snow']), # no daily snow
+    '2cfs1':dict(model='PIOMAS',gridName='360X120',model_group='360X120',dist_thresh=25.,nt=46,file_varnames=['hiday','snowday']),
+    '2sstC':dict(model='PIOMAS',gridName='360X120',model_group='360X120',dist_thresh=25.,nt=47,file_varnames=['hiday','snowday']), # public PIOMAS
+    '3sst': dict(model='PIOMAS',gridName='360X120',model_group='360X120',dist_thresh=25.,nt=46,file_varnames=['hiday','snowday']), # no snowday nc as of 2026-11-02
     # GIOMAS: Arctic cells are ~27-33 km (median), up to ~45 km, so a larger threshold than 360X120
-    '2cfs': dict(gridName='360X276',model_group='360X276',dist_thresh=35.,nt=47,file_varnames=['hiday','snowday']),
+    '2cfs': dict(model='GIOMAS',gridName='360X276',model_group='360X276',dist_thresh=35.,nt=47,file_varnames=['hiday','snowday']),
     }
 
 def driver(model_id='1c',output_root="/home/axel/ax_python_lib/thickCDR/extractDir/",
