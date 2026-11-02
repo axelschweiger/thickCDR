@@ -9,8 +9,8 @@ import sys
 import xarray as xr
 import pandas as pd 
 import os
+import glob
 import numpy as np
-import os
 import dask
 import logging 
 import time 
@@ -39,6 +39,15 @@ def readMerged(model_id,gridName,sources=None,
 #    model_id='2cfs1'
 #    gridName='360X120'
     print("Reading data from ",input_root)
+    # one-pass extraction file (extract_all) is used if it exists, otherwise the per-source merged files
+    extract_files=sorted(glob.glob(input_root+gridName+"/"+model_id+"/"+model_id+".extract.*.nc"))
+    if extract_files:
+        logging.info("Reading one-pass extraction %s",extract_files[0])
+        obsAndModel=xr.open_dataset(extract_files[0])
+        if sources is not None:
+            if not isinstance(sources,list): sources=[sources]
+            obsAndModel=obsAndModel.isel(cdr_index=np.where(obsAndModel.SOURCE.isin(sources).values)[0])
+        return obsAndModel
     files=select_source_files(model_id,gridName,sources=sources,
                               input_root= input_root)
     #infile= input_dir+'1c.merged.AIR-EM.heff.snow.nc'
@@ -88,7 +97,7 @@ def points2pos(points): # helper function to reform that data points.
     pos=np.deg2rad(pointsd) # array of 2 element arrays
     return pos,id_list,time_list 
 
-def match_points(cdr_data,ds,varnames,ancil_data,dist_thresh=10.):
+def match_points(cdr_data,ds,varnames,ancil_data,dist_thresh=10.,source=None):
 #   finds closest points in model data provide in ds and points provided in cdr_data
 #   points further away than dist_thresh are not matched.     
 
@@ -299,6 +308,7 @@ def read_match_pointDB_file(match_pointDB_file,varnames,verbose=False):
         test.close()
     return out
 def draft2thick(obsAndModel):
+    # note: no submarine bias correction here, use toThick() for that
     draft_idx=np.where(~np.isnan(obsAndModel.DRAFT[:,0])) # get indices for draft var
     draft=obsAndModel.DRAFT[draft_idx,0]
     month=obsAndModel.obs_time[draft_idx].dt.month.values
@@ -314,13 +324,19 @@ def thick2draft(obsAndModel):
     idx=np.where(~np.isnan(obsAndModel.THICK[:,0])) # get indices for draft var
     thick=obsAndModel.THICK[idx,0]
     month=obsAndModel.obs_time[idx].dt.month.values
-    snow=obsAndModel.sisnthick[draft_idx].data
+    snow=obsAndModel.sisnthick[idx].data
     draft=ax_thick2draft(thick,snow,month=month)
     obsAndModel.DRAFT[idx,0]=draft
     return obsAndModel
 
 def toThick(obsAndModel):
     # compute thickness, draft and THCKE_ICE_SNOW for sources that don't have them
+    # works on a copy: calling it twice on the same data set used to apply the submarine bias twice
+    if obsAndModel.attrs.get('toThick_applied',False):
+        logging.info("toThick already applied, returning data unchanged")
+        return obsAndModel
+    obsAndModel=obsAndModel.copy(deep=True)
+    obsAndModel.attrs['toThick_applied']=1 # int, so it survives to_netcdf
     month=obsAndModel.obs_time.dt.month.values
     snow=obsAndModel.sisnthick.data
     
@@ -328,7 +344,23 @@ def toThick(obsAndModel):
     draft_idx=np.where(~np.isnan(obsAndModel.DRAFT[:,0]))[0] # get indices for sources with draft
     iAs_idx=np.where(~np.isnan(obsAndModel.THICK_ICE_SNOW[:,0]))[0] # get indices for sources with draft
     
+    sub_idx=np.where(obsAndModel.SOURCE.isin(['USSUB-DG','USSUB-AN','UKSUB-AN','UKSUB-DG','USSUB-HI']))
+   
+    if  len(sub_idx[0]) >0 : 
+        print(len(sub_idx[0]))
+        #old_draft=obsAndModel.isel(cdr_index=sub_idx[0]).DRAFT[:,0]
+        logging.info("Removing Submarine Bias")
+        sub_bias=-0.29
+        print("before bias removal: :",obsAndModel.isel(cdr_index=sub_idx[0]).DRAFT[:,0].mean().data)
+        # .loc is needed for assignment
+        obsAndModel['DRAFT'].loc[
+            dict(cdr_index=obsAndModel.cdr_index[sub_idx],
+                 **{'Mean Max Min Sigma':0})]+=sub_bias
+       
+        print("After bias removal: :",obsAndModel.isel(cdr_index=sub_idx[0]).DRAFT[:,0].mean().data)
+       
     draft=obsAndModel.DRAFT[:,0]
+    
     thick=obsAndModel.THICK[:,0]
     thick_ice_snow=obsAndModel.THICK_ICE_SNOW[:,0]
     
@@ -415,13 +447,13 @@ def scatter_plot(ds,model_name,title=None,max_thick=10.,draft=False):
         mod_thick= ax_thick2draft(ds.sit.data,snow,month=month) 
 #   obs_thick=ds.DRAFT[:,0].data
    
-    good_idx=np.where(np.isfinite(obs_thick))[0]
+    good_idx=np.where(np.isfinite(obs_thick) & np.isfinite(mod_thick))[0]
     mod_thick=mod_thick[good_idx]
     obs_thick=obs_thick[good_idx]
     mhas_nan = np.any(np.isnan(mod_thick))
     ohas_nan = np.any(np.isnan(obs_thick))
-    print(mhas_nan)
-    print(ohas_nan)
+    print("Model has Nan: " , mhas_nan)
+    print("Observations have Nan:", ohas_nan)
     
     model = sm.OLS(mod_thick, sm.add_constant(obs_thick),missing='drop')
     results = model.fit()
@@ -448,13 +480,34 @@ def scatter_plot(ds,model_name,title=None,max_thick=10.,draft=False):
     rmse=root_mean_squared_error(obs_thick,mod_thick)
     meane=np.mean(obs_thick-mod_thick)
 #    ax.legend(fontsize=12)
-    annotation_text = (f'Errors (mean/rms): {meane:.2f}/{rmse:.2f}\n'
+    annotation_text = (f'Obs-Mod (mean/rms): {meane:.2f}/{rmse:.2f}\n'
                        f'R² = {results.rsquared:.2f}\n'
                        f'y = {m:.2f}x + {b:.2f}\n')
     
     ax.annotate(annotation_text, xy=(0.05, 0.80), xycoords='axes fraction',
              fontsize=10, bbox=dict(boxstyle="round,pad=0.3", fc="white", ec="None", lw=1))
     return fig,ax,results
+def source_stats(ds,draft=False):
+    # table of model vs observation statistics by source (+ ALL), after toThick()
+    # draft=True compares draft (model draft from sit, snow and month as in scatter_plot)
+    if draft:
+        obs=ds.DRAFT[:,0].values
+        mod=ax_thick2draft(ds.sit.values,ds.sisnthick.values,month=ds.obs_time.dt.month.values)
+    else:
+        obs=ds.THICK[:,0].values
+        mod=ds.sit.values
+    df=pd.DataFrame({'source':ds.SOURCE.values,'obs':obs,'mod':mod})
+    df=df[np.isfinite(df.obs) & np.isfinite(df['mod'])]
+    def _stats(d):
+        diff=d['mod']-d.obs
+        return pd.Series({'n':len(d),'obs_mean':d.obs.mean(),'mod_mean':d['mod'].mean(),
+                          'bias(mod-obs)':diff.mean(),'rmse':np.sqrt((diff**2).mean()),
+                          'r':d.obs.corr(d['mod']) if len(d)>2 else np.nan})
+    table=pd.DataFrame({src:_stats(d) for src,d in df.groupby('source')}).T
+    table.loc['ALL']=_stats(df)
+    table['n']=table['n'].astype(int)
+    return table
+
 def plot_histograms(ds,model_name, title=None): 
     import numpy as np
     import matplotlib.pyplot as plt
@@ -471,7 +524,7 @@ def plot_histograms(ds,model_name, title=None):
     diff=obs_thick-mod_thick
     ax1.hist(diff, bins= 50, range=[-3,3], alpha=0.5, label=['Obs-Mod'])
     ax1.legend(loc='upper right')
-    ax1.set_tile=('Difference (Obs-Mod) ' + title)
+    ax1.set_title('Difference (Obs-Mod) ' + title)
     plt.show()
     return fig,ax0,ax1
 def scatter_plot_sns(): 
@@ -537,30 +590,20 @@ def make_match_points_db(cdr_data=None,cdr_file=None,
     logging.basicConfig(stream=sys.stdout,level=logging.INFO)
     logging.info("Start of extraction")
     t0=time.process_time()   
-
     sc,vc,_=im.getAncilData(gridName=gridName)
     g=im.gridInfo(gridName) 
     nx=g.nx; ny=g.ny
     nt=42 # not clear if this is necessary.. This will depend on number of years to match. 
-    
-    input_files=make_input_file_list(model_path,file_varnames)
-    xchunk=nx
-    ychunk=ny
-    tchunk=12*nt 
     if not isinstance(cdr_data,dict):  
         logging.info("reading CDR data")
         cdr_data,_=read_thickCDR(source) # may want to do some filtering here. 
     if not isinstance(ds,xr.Dataset):   # load the model_data set if this isn't done 
         logging.info("Model Data set will be loaded  %s", source )
-        with ProgressBar(): 
-            ds=xr.open_mfdataset(input_files,chunks=({"x":xchunk,"y":ychunk,"time":tchunk}))
-            ds=ds.chunk({'time':tchunk}) # no idea if that helps, would seem like we are doign this already above
-            if "Latitude" in list(ds.coords.keys()): # some of the heff files have Latitude/Longitude as coordinates                                                 # rename
-                ds=ds.rename({"Longitude":"lon","Latitude":"lat"})   
+        ds=load_model_data(model_path,file_varnames,nx,ny,nt)
     #       match the data in points with the data from the closest grid point         
     with ProgressBar(): 
         logging.info("Starting Matching for :  %s",source)
-        pmds = match_points(cdr_data,ds,ncdf_varnames,sc,dist_thresh=dist_thresh)
+        pmds = match_points(cdr_data,ds,ncdf_varnames,sc,dist_thresh=dist_thresh,source=source)
         if not isinstance(pmds,xr.Dataset):
             logging.warning("No good points found for source  %s", source )
             return -1 
@@ -583,6 +626,9 @@ def load_model_data(model_path,file_varnames,nx,ny,nt):
        ds=ds.chunk({'time':tchunk}) # no idea if that helps, would seem like we are doign this already above
        if "Latitude" in list(ds.coords.keys()): # some of the heff files have Latitude/Longitude as coordinates                                                 # rename
            ds=ds.rename({"Longitude":"lon","Latitude":"lat"})
+   if file_varnames[0] in ['heff','snow']: # monthly files are stamped on the 1st, move to mid-month
+       ds['time']=ds['time'] + pd.to_timedelta(ds.time.dt.days_in_month.values/2.,unit='D')
+       logging.info("Monthly data: model time shifted to mid-month")
    logging.info("Done reading input model_data")
    return ds
 
@@ -599,7 +645,7 @@ def merge_pointDB_withCDR(cdr_ds=None,cdr_file='/home/axel/projects/sea_ice_cdr/
     if not isinstance(cdr_ds,xr.Dataset):
         cdr_ds=xr.open_dataset(cdr_file)
         if not source == None:
-            cdr_ds=cdr_cds.where(cdr_ds.SOURCE==source,drop=True)
+            cdr_ds=cdr_ds.where(cdr_ds.SOURCE==source,drop=True)
         logging.info("Reading CDR frome file")    
     # select the points in the observation data that correspond to the 
     # matched points... This is so we don't have to pass all data into 
@@ -617,7 +663,7 @@ def merge_pointDB_withCDR(cdr_ds=None,cdr_file='/home/axel/projects/sea_ice_cdr/
     obs_time=obsAndModel.obs_time
     diff_time=(model_time-obs_time).dt.days
 
-    good_idx=np.where(np.abs(diff_time) < 15)[0] # tuple with one array per dimension hence select [0]
+    good_idx=np.where(np.abs(diff_time) <= 15)[0] # tuple with one array per dimension hence select [0]
     #print("number of good elements: ", good_idx.size)
     if good_idx.size > 0 : 
         obsAndModel=obsAndModel.isel(cdr_index=good_idx) # is that really true
@@ -632,65 +678,156 @@ def merge_pointDB_withCDR(cdr_ds=None,cdr_file='/home/axel/projects/sea_ice_cdr/
     cdr_ds.close()
     return obsAndModel
 
-def driver(): 
-    # main driver program. Edit as needed. 
+# ---------------------------------------------------------------------------
+# One-pass extraction: all CDR sources matched against the model in a single
+# pass and written to one file per model run
+#   <output_path>/<model_id>.extract.<var0>.<var1>.nc
+# Same variables as the per-source *.merged.* files, so readMerged/toThick/
+# scatter_plot work unchanged.
+# Speed: one BallTree query for all points; then for each model year-file
+# only the time steps that have observations are read and indexed with numpy
+# (no dask point indexing, which was the slow part).
+# ---------------------------------------------------------------------------
+EXCLUDE_SOURCES=['AWI-WS','USSUB-HI']
+
+def model_file_times(files,monthly=False):
+    # time axis of each yearly model file, monthly files shifted to mid-month
+    times=[];file_id=[];local_t=[]
+    for i,f in enumerate(files):
+        with xr.open_dataset(f) as ds:
+            t=pd.DatetimeIndex(ds.time.values)
+        if monthly:
+            t=t+pd.to_timedelta(t.days_in_month/2.,unit='D')
+        times.append(t.values);file_id.append(np.full(t.size,i));local_t.append(np.arange(t.size))
+    times=np.concatenate(times);file_id=np.concatenate(file_id);local_t=np.concatenate(local_t)
+    order=np.argsort(times,kind='stable')
+    return pd.DatetimeIndex(times[order]),file_id[order],local_t[order]
+
+def extract_points(files,ncvar,obs_time,iy,ix,monthly=False,max_days=15):
+    # model values at grid cells (iy,ix) at the model time closest to obs_time
+    # returns values, model_time, valid (obs within max_days of a model time), variable attrs
+    mtimes,file_id,local_t=model_file_times(files,monthly=monthly)
+    k=mtimes.get_indexer(pd.DatetimeIndex(obs_time),method='nearest')
+    model_time=mtimes.values[k]
+    # same criterion as merge_pointDB_withCDR: abs(diff.dt.days) <= max_days
+    diff_days=pd.TimedeltaIndex(model_time-obs_time).days
+    valid=(k>=0) & (np.abs(diff_days)<=max_days)
+    values=np.full(obs_time.size,np.nan,dtype='float32')
+    fk=file_id[k];tk=local_t[k]
+    attrs={}
+    for i in np.unique(fk[valid]):
+        sel=np.where(valid & (fk==i))[0]
+        tsel,tinv=np.unique(tk[sel],return_inverse=True)
+        with xr.open_dataset(files[i]) as ds:
+            data=ds[ncvar].isel(time=tsel).values # only time steps with observations
+            attrs=dict(ds[ncvar].attrs)
+        values[sel]=data[tinv,iy[sel],ix[sel]]
+    attrs.pop('coordinates',None)
+    return values,model_time,valid,attrs
+
+def extract_all(model_id,model_path,gridName,file_varnames,ncdf_varnames=['sit','sisnthick'],
+                cdr_file='/home/axel/projects/sea_ice_cdr/idl/axel_cdr/ncdf_dir/uThickCDR_summaries.20251010_V1.0.nc',
+                dist_thresh=10.,output_file=None,exclude_sources=EXCLUDE_SOURCES,max_days=15):
+    # matches all CDR points to the closest ocean grid cell (within dist_thresh km)
+    # and closest model time (within max_days) and returns/writes CDR + model values
     logging.basicConfig(stream=sys.stdout,level=logging.INFO)
-#    cdr_file='/home/axel/projects/sea_ice_cdr/idl/axel_cdr/ncdf_dir/uThickCDR_summaries.20251010_V1.0.nc'
-    cdr_file='/home/axel/projects/sea_ice_cdr/idl/axel_cdr/ncdf_dir/uThickCDR_summaries.20190920_V3.0.nc'
-    """
-    gridName='912X672'
-    model_id='1c'
-    model_group='capmas'
-    dist_thresh=10.
-    nt=44
-    file_varnames=['heff','snow']
-    model_path="/data/axel0/model_results/capmas/1c/nc/"
-    """
+    t0=time.time()
+    cdr_ds=xr.open_dataset(cdr_file).load() # ~150MB; lazy fancy indexing of the file is very slow
+    if exclude_sources:
+        cdr_ds=cdr_ds.isel(cdr_index=np.where(~cdr_ds.SOURCE.isin(exclude_sources).values)[0])
+    # matching uses FDATE (days since 1900-01-01), like read_thickCDR
+    obs_time=np.datetime64('1900-01-01','ns')+pd.to_timedelta(cdr_ds.FDATE.values,unit='D').values
+    plat=cdr_ds.LAT.values.astype('float64')
+    plon=axutil.lonTo180(cdr_ds.LON.values).astype('float64')
+    logging.info("CDR: %d points",plat.size)
 
-    """
-    gridName='912X672'
-    model_id='2c'
-    model_group='capmas'
-    dist_thresh=10.
-    nt=21
-    file_varnames=['heff','snow']
-    model_path="/data/axel0/model_results/capmas/2c/nc/"
-    """
-    """
-    #   model_path="/data/axel0/model_results/2e/nc/"
-    #   gridName='752X240
-    """
-    """
-    gridName='360X120'   
-    model_group=''
-    model_id='2cfs1'
-    dist_thresh=25. # maximum between grid cell center and observation
-    file_varnames=['hiday','snowday'] 
-    nt=46
-    """
+    files={v:sorted(glob.glob(model_path+v+'.H*.nc')) for v in file_varnames}
+    for v in file_varnames:
+        if not files[v]:
+            raise FileNotFoundError(f"no {v}.H*.nc files in {model_path}")
+    with xr.open_dataset(files[file_varnames[0]][0]) as ds:
+        if "Latitude" in ds.coords: ds=ds.rename({"Longitude":"lon","Latitude":"lat"})
+        mlat=ds.lat.values; mlon=ds.lon.values
+        has_data=np.isfinite(ds[ncdf_varnames[0]].values).any(axis=0).flatten()
+    ny,nx=mlat.shape
+    sc,_,_=im.getAncilData(gridName=gridName)
+    omask=sc.OceanMask.values.reshape(ny,nx).flatten()==1
+    # only match to cells that have model data: model output converted with an older
+    # ancil mask can be NaN in cells the current OceanMask calls ocean (912X672: 9093 coastal cells)
+    if (omask & ~has_data).sum()>0:
+        logging.warning("%d OceanMask cells have no model data and are not used for matching",(omask & ~has_data).sum())
+    omask=omask & has_data
+    oindex=np.arange(nx*ny)[omask]
+    latlon=np.deg2rad(np.column_stack([mlat.flatten()[omask],axutil.lonTo180(mlon.flatten()[omask])]))
+    tree=BallTree(latlon,metric='haversine')
+    dist,idx=tree.query(np.deg2rad(np.column_stack([plat,plon])),k=1)
+    dist=dist[:,0]*6371.;idx=oindex[idx[:,0]]
+    near=dist<=dist_thresh
+    logging.info("%d points within %.1f km of an ocean grid cell",near.sum(),dist_thresh)
+    iy,ix=np.unravel_index(idx[near],(ny,nx))
+    t_near=obs_time[near]
 
-    gridName='360X120'   
-    model_group=''
-    model_id='2sstC'
-    dist_thresh=25. # maximum between grid cell center and observation
-    nt=46
-    file_varnames=['hiday','snowday']    
-    model_path="/data/axel0/model_results/2sst/nc/"
-    
-    """
-    gridName='360X120'   
-    model_group=''
-    model_id='3sst'
-    dist_thresh=25. # maximum between grid cell center and observation
-    nt=46
-    file_varnames=['hiday','snowday']    
-    model_path="/data/axel0/model_results/"+model_id+"/nc/"
-    """
+    out={};valid_all=None;model_time=None
+    for v,ncvar in zip(file_varnames,ncdf_varnames):
+        logging.info("Extracting %s (%s) from %d files",ncvar,v,len(files[v]))
+        vals,mt,valid,attrs=extract_points(files[v],ncvar,t_near,iy,ix,monthly=v in ['heff','snow'],max_days=max_days)
+        out[ncvar]=(vals,attrs)
+        if model_time is None: # model_time and time window from the thickness variable
+            model_time=mt;valid_all=valid
+    keep=np.where(near)[0][valid_all]
+    sub=np.where(valid_all)[0]
+    res=cdr_ds.isel(cdr_index=keep).rename({'time':'obs_time'})
+    for ncvar,(vals,attrs) in out.items():
+        res[ncvar]=xr.DataArray(vals[sub],dims='cdr_index',attrs=attrs)
+    res['model_time']=xr.DataArray(model_time[sub],dims='cdr_index')
+    res['lon']=xr.DataArray(mlon[iy[sub],ix[sub]],dims='cdr_index')
+    res['lat']=xr.DataArray(mlat[iy[sub],ix[sub]],dims='cdr_index')
+    res['point_lon']=xr.DataArray(plon[near][sub].astype('float32'),dims='cdr_index',attrs={"long_name":"Point Longitude"})
+    res['point_lat']=xr.DataArray(plat[near][sub].astype('float32'),dims='cdr_index',attrs={"long_name":"Point Latitude"})
+    res['dist']=xr.DataArray(dist[near][sub],dims='cdr_index',attrs={"long_name":"Distance from closest grid point [km]"})
+    res=res.sortby('cdr_index')
+    res.attrs.update({'id':model_id,'model_path':model_path,'gridName':gridName,
+                      'file_varnames':' '.join(file_varnames),'dist_thresh_km':dist_thresh,
+                      'max_days':max_days,'cdr_file':cdr_file,
+                      'excluded_sources':' '.join(exclude_sources or [])})
+    logging.info("%d points matched in space and time, %.1f s",res.sizes['cdr_index'],time.time()-t0)
+    if output_file:
+        res.to_netcdf(output_file)
+        logging.info("Wrote %s",output_file)
+    cdr_ds.close()
+    return res
+
+# model runs that have been compared to the CDR. model_path defaults to
+# /data/axel0/model_results/<model_group>/<model_id>/nc/
+# file_varnames: ['heff','snow'] = monthly, ['hiday','snowday'] = daily
+RUNS={
+    '1c':   dict(gridName='912X672',model_group='912X672',dist_thresh=10.,nt=44,file_varnames=['heff','snow']),
+    '2c':   dict(gridName='912X672',model_group='912X672',dist_thresh=10.,nt=21,file_varnames=['heff','snow']),
+    '2g':   dict(gridName='752X240',model_group='',dist_thresh=10.,nt=76,file_varnames=['hiday','snowday']),
+    '1e':   dict(gridName='752X240',model_group='',dist_thresh=25.,nt=44,file_varnames=['heff','snow']), # no daily snow
+    '2cfs1':dict(gridName='360X120',model_group='',dist_thresh=25.,nt=46,file_varnames=['hiday','snowday']),
+    '2sstC':dict(gridName='360X120',model_group='',dist_thresh=25.,nt=46,file_varnames=['hiday','snowday'],
+                 model_path="/data/axel0/model_results/2sst/nc/"),
+    '3sst': dict(gridName='360X120',model_group='',dist_thresh=25.,nt=46,file_varnames=['hiday','snowday']),
+    # GIOMAS: Arctic cells are ~27-33 km (median), up to ~45 km, so a larger threshold than 360X120
+    '2cfs': dict(gridName='360X276',model_group='360X276',dist_thresh=35.,nt=47,file_varnames=['hiday','snowday']),
+    }
+
+def driver(model_id='1c',output_root="/home/axel/ax_python_lib/thickCDR/extractDir/",
+           cdr_file='/home/axel/projects/sea_ice_cdr/idl/axel_cdr/ncdf_dir/uThickCDR_summaries.20251010_V1.0.nc'): 
+    # main driver program. Add new model runs to RUNS above.
+    # older CDR version: '/home/axel/projects/sea_ice_cdr/idl/axel_cdr/ncdf_dir/uThickCDR_summaries.20190920_V3.0.nc'
+    # with output_root=".../extractDir_2019v/"
+    logging.basicConfig(stream=sys.stdout,level=logging.INFO)
+    run=RUNS[model_id]
+    gridName=run['gridName']
+    model_group=run['model_group']
+    dist_thresh=run['dist_thresh']
+    nt=run['nt']
+    file_varnames=run['file_varnames']
     g=im.gridInfo(gridName) 
     nx=g.nx; ny=g.ny
-    model_path="/data/axel0/model_results/"+model_group+"/"+model_id+"/nc/"
-#   Trying to use 2019 netcdf version to see if there are big changes in CS2
-    output_root="/home/axel/ax_python_lib/thickCDR/extractDir_2019v/"
+    model_path=run.get('model_path',"/data/axel0/model_results/"+model_group+"/"+model_id+"/nc/")
 #   this is the directory where the output is located 
     output_path=output_root+ "/"+gridName+"/"+model_id+"/"
     if not (os.path.isdir(output_path)): 
@@ -711,6 +848,7 @@ def driver():
     match=True
     merge=True
 #   sources=sources[0:2]
+#    sources=['CryoSat-AWI']
     for source in sources: 
         print(source)
         id= model_id +"_"  + source # name used for identifcation inside of file 
@@ -741,8 +879,27 @@ def driver():
             cdr_ds.close()
     return 
     
+def driver_onepass(model_id='1c',output_root="/home/axel/ax_python_lib/thickCDR/extractDir/",
+                   cdr_file='/home/axel/projects/sea_ice_cdr/idl/axel_cdr/ncdf_dir/uThickCDR_summaries.20251010_V1.0.nc'):
+    # one-pass alternative to driver(): writes <output_root>/<grid>/<model_id>/<model_id>.extract.<var0>.<var1>.nc
+    run=RUNS[model_id]
+    model_path=run.get('model_path',"/data/axel0/model_results/"+run['model_group']+"/"+model_id+"/nc/")
+    output_path=output_root+run['gridName']+"/"+model_id+"/"
+    os.makedirs(output_path,exist_ok=True)
+    output_file=output_path+model_id+'.extract.'+'.'.join(run['file_varnames'])+'.nc'
+    return extract_all(model_id,model_path,run['gridName'],run['file_varnames'],
+                       cdr_file=cdr_file,dist_thresh=run['dist_thresh'],output_file=output_file)
+
 if __name__ == "__main__":
-    driver()
+    # python match_thickCDR_model.py <model_id> [--twostep]
+    ap=argparse.ArgumentParser()
+    ap.add_argument('model_id',choices=list(RUNS.keys()))
+    ap.add_argument('--twostep',action='store_true',help='old per-source matchDB + merged files')
+    args=ap.parse_args()
+    if args.twostep:
+        driver(args.model_id)
+    else:
+        driver_onepass(args.model_id)
 #    subset=readMerged(source='BGEP')
 #    test=toThick(subset)
     
