@@ -245,29 +245,30 @@ def ax_draft2thick(draft,snow,month=None,swe=False):
 #  nth.
    if isinstance(month,np.ndarray): 
       rho_snow=np.float32(rho_snow_t[month-1])
-   if swe: 
-      thick=rho_water/rho_ice * draft - snow  
+#  flotation: rho_water*draft = rho_ice*thick + rho_snow*snow_depth (= rho_fw*SWE)
+   rho_fw = 1000.
+   if swe:
+      thick=rho_water/rho_ice * draft - rho_fw/rho_ice * snow
    else:
-      thick=rho_water/rho_ice * draft - rho_snow/rho_ice * snow ; 
+      thick=rho_water/rho_ice * draft - rho_snow/rho_ice * snow ;
    return thick
-def ax_thick2draft(thick,snow,month=None,swe=False): 
-
-#   if keyword set swe then convert swater equivalent to snow depth
-#   input netcdf files have converted SWE to snow depth by multiplying 
-#   by a scaler of 3. (ax_im_varinfo.py)
-    rho_ice = 928  
+def ax_thick2draft(thick,snow,month=None,swe=False):
+#   flotation: draft = (rho_ice*thick + rho_snow*snow_depth)/rho_water, the exact inverse of ax_draft2thick.
+#   snow is a DEPTH by default: model nc sisnthick is a depth (the converter multiplies Zhang's SWE output by 3,
+#   im/ax_im_varinfo.py); swe=True takes snow water equivalent instead.
+#   Fixed 2026-11-09: the depth path multiplied the depth by rho_fw/rho_snow as if it were SWE, which made snow weigh
+#   9-19x too much (2 m ice, 0.25 m snow: draft 0.6-1.0 m too deep); the swe path used rho_ice for the snow load (~5 mm).
+    rho_ice = 928
     rho_water=1027.
-    rho_fw = 1000. 
+    rho_fw = 1000.
     rho_snow = rho_ice/3.0
-    rho_snow_t=np.array([308,318,327,328,329,348,383,219,246,271,291,301]) 
-    if isinstance(month,np.ndarray): 
+    rho_snow_t=np.array([308,318,327,328,329,348,383,219,246,271,291,301])
+    if isinstance(month,np.ndarray):
         rho_snow=np.float32(rho_snow_t[month-1])
-    # if swe is set the use as snow water equivalent
-    if swe: 
-       draft= (thick + snow) * rho_ice/rho_water
+    if swe:
+       draft= (rho_ice*thick + rho_fw*snow)/rho_water
     else:
-       stemp= snow  * rho_fw/rho_snow  # convert to snow depth
-       draft= (thick + stemp)* rho_ice/rho_water
+       draft= (rho_ice*thick + rho_snow*snow)/rho_water
     return draft
     
 def make_points_data(): # generates some random point data for testing
